@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+
+usage() {
+  cat <<USAGE
+Usage:
+  ./scripts/xf-shell <xenforo-version> <php-version>
+
+Example:
+  ./scripts/xf-shell 2.3.10 8.3
+USAGE
+}
+
+[[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && { usage; exit 0; }
+[[ $# -lt 2 ]] && { usage; exit 1; }
+
+XF_VERSION="$1"
+PHP_VERSION="$2"
+INSTANCE_NAME="$(normalise_instance_name "$XF_VERSION" "$PHP_VERSION")"
+PROJECT_NAME="$(normalise_project_name "$XF_VERSION" "$PHP_VERSION")"
+INSTANCE_DIR="$ROOT_DIR/instances/$INSTANCE_NAME"
+COMPOSE_FILE="$INSTANCE_DIR/compose.yml"
+
+[[ -f "$COMPOSE_FILE" ]] || fatal "No instance found. Run: ./scripts/xf-up $XF_VERSION $PHP_VERSION"
+compose_cmd -f "$COMPOSE_FILE" -p "$PROJECT_NAME" exec php bash

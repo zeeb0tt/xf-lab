@@ -1,0 +1,17 @@
+# macOS / editor junk
+.DS_Store
+._*
+__MACOSX/
+
+# Local environment overrides/secrets
+.env
+*.local
+
+# Licensed XenForo archives are never committed
+archives/*.zip
+
+# Generated disposable instances, databases, webroots, ngrok tokens/logs
+instances/
+
+# Logs
+*.log

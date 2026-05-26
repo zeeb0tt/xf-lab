@@ -1,0 +1,322 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+
+usage() {
+  cat <<USAGE
+Usage:
+  ./scripts/xf-up <xenforo-version> <php-version>
+
+Examples:
+  ./scripts/xf-up 2.3.10 8.3
+  PORT=9090 ./scripts/xf-up 2.3.10 8.3
+  ADDON_ID=Zee/ModerationApi ./scripts/xf-up 2.3.10 8.3
+
+Public ngrok example:
+  PUBLIC=ngrok NGROK_AUTHTOKEN=YOUR_TOKEN ADDON_ID=Zee/ModerationApi ./scripts/xf-up 2.1.15 7.2
+
+Optional ngrok env vars:
+  PUBLIC=ngrok              Enable public ngrok tunnel. NGROK=1 also works.
+  NGROK_AUTHTOKEN=...       Used to write the per-instance ngrok config. Required unless already stored for this instance.
+  NGROK_AUTH_USER=zee       HTTP Basic Auth username. Default: zee
+  NGROK_AUTH_PASS=...       HTTP Basic Auth password. Default: generated and saved per instance.
+  NGROK_AUTH=0              Disable ngrok Basic Auth. Not recommended for licensed XenForo test installs.
+  NGROK_URL=https://...     Optional reserved/static ngrok URL. Random dev URL is used if omitted.
+
+Expected XenForo archive:
+  archives/xenforo-<xenforo-version>.zip
+USAGE
+}
+
+[[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && { usage; exit 0; }
+[[ $# -lt 2 ]] && { usage; exit 1; }
+
+need_cmd docker
+need_cmd unzip
+need_cmd python3
+
+XF_VERSION="$1"
+PHP_VERSION="$2"
+INSTANCE_NAME="$(normalise_instance_name "$XF_VERSION" "$PHP_VERSION")"
+PROJECT_NAME="$(normalise_project_name "$XF_VERSION" "$PHP_VERSION")"
+INSTANCE_DIR="$ROOT_DIR/instances/$INSTANCE_NAME"
+WEBROOT="$INSTANCE_DIR/webroot"
+ARCHIVE="$ROOT_DIR/archives/xenforo-$XF_VERSION.zip"
+PORT="${PORT:-$(calculate_port "$XF_VERSION" "$PHP_VERSION")}" 
+PUBLIC_MODE="${PUBLIC:-${NGROK:-}}"
+NGROK_ENABLED=0
+if [[ "$PUBLIC_MODE" == "ngrok" || "$PUBLIC_MODE" == "1" || "$PUBLIC_MODE" == "true" || "$PUBLIC_MODE" == "yes" ]]; then
+  NGROK_ENABLED=1
+fi
+NGROK_API_PORT="${NGROK_API_PORT:-$(calculate_ngrok_api_port "$XF_VERSION" "$PHP_VERSION")}" 
+ADDON_ID="${ADDON_ID:-}"
+ADDON_SOURCE_RESOLVED=""
+BOARD_URL="${LAB_URL:-http://localhost:$PORT}"
+PUBLIC_URL=""
+BASIC_AUTH_NOTE=""
+
+[[ -f "$ARCHIVE" ]] || fatal "Missing XenForo archive: $ARCHIVE"
+
+mkdir -p "$INSTANCE_DIR"
+
+if [[ ! -f "$WEBROOT/cmd.php" ]]; then
+  echo "Creating fresh instance: $INSTANCE_NAME"
+  rm -rf "$WEBROOT"
+  mkdir -p "$WEBROOT"
+  TMP_DIR="$INSTANCE_DIR/_extract"
+  rm -rf "$TMP_DIR"
+  mkdir -p "$TMP_DIR"
+  unzip -q "$ARCHIVE" -d "$TMP_DIR"
+
+  UPLOAD_DIR=""
+  if [[ -d "$TMP_DIR/upload" ]]; then
+    UPLOAD_DIR="$TMP_DIR/upload"
+  else
+    UPLOAD_DIR="$(find "$TMP_DIR" -maxdepth 3 -type d -name upload 2>/dev/null | head -n 1 || true)"
+  fi
+
+  if [[ -z "$UPLOAD_DIR" || ! -f "$UPLOAD_DIR/cmd.php" ]]; then
+    if [[ -f "$TMP_DIR/cmd.php" ]]; then
+      UPLOAD_DIR="$TMP_DIR"
+    else
+      fatal "Could not find XenForo upload directory containing cmd.php in $ARCHIVE"
+    fi
+  fi
+
+  cp -a "$UPLOAD_DIR/." "$WEBROOT/"
+  rm -rf "$TMP_DIR"
+
+  mkdir -p "$WEBROOT/data" "$WEBROOT/internal_data" "$WEBROOT/src"
+  cat > "$WEBROOT/src/config.php" <<PHP
+<?php
+
+\$config['db']['host'] = 'db';
+\$config['db']['port'] = '3306';
+\$config['db']['username'] = 'xenforo';
+\$config['db']['password'] = 'xenforo';
+\$config['db']['dbname'] = 'xenforo';
+\$config['fullUnicode'] = true;
+\$config['enableMail'] = false;
+\$config['development']['enabled'] = true;
+\$config['chmodWritableValue'] = 0666;
+PHP
+  chmod -R ug+rwX "$WEBROOT"
+else
+  echo "Reusing existing instance files: $INSTANCE_NAME"
+fi
+
+COMPOSE_FILE="$INSTANCE_DIR/compose.yml"
+
+ADDON_VOLUME_BLOCK=""
+if [[ -n "$ADDON_ID" ]]; then
+  ADDON_SOURCE_RESOLVED="$(resolve_addon_source "$ADDON_ID")"
+  ADDON_VOLUME_BLOCK="      - \"$ADDON_SOURCE_RESOLVED:/var/www/html/src/addons/$ADDON_ID:rw\""
+  echo "Mounting add-on: $ADDON_ID"
+  echo "From: $ADDON_SOURCE_RESOLVED"
+fi
+
+cat > "$COMPOSE_FILE" <<YAML
+services:
+  php:
+    build:
+      context: "$ROOT_DIR"
+      dockerfile: docker/php/Dockerfile
+      args:
+        PHP_VERSION: "$PHP_VERSION"
+    ports:
+      - "$PORT:80"
+    volumes:
+      - "$WEBROOT:/var/www/html:rw"
+$ADDON_VOLUME_BLOCK
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      XF_ADMIN_USER: "admin"
+      XF_ADMIN_PASS: "Admin123Pass"
+      XF_ADMIN_EMAIL: "admin@example.com"
+      XF_BOARD_TITLE: "XenForo Lab $XF_VERSION PHP $PHP_VERSION"
+      XF_BOARD_URL: "$BOARD_URL"
+
+  db:
+    image: mariadb:10.6
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_DATABASE: xenforo
+      MYSQL_USER: xenforo
+      MYSQL_PASSWORD: xenforo
+      MYSQL_ROOT_PASSWORD: root
+    volumes:
+      - "$INSTANCE_DIR/mysql:/var/lib/mysql:rw"
+    healthcheck:
+      test: ["CMD", "mariadb-admin", "ping", "-uroot", "-proot", "--silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+YAML
+
+compose_cmd -f "$COMPOSE_FILE" -p "$PROJECT_NAME" up -d --build
+wait_for_db "$COMPOSE_FILE" "$PROJECT_NAME"
+
+compose_cmd -f "$COMPOSE_FILE" -p "$PROJECT_NAME" exec -T php bash -lc 'mkdir -p /var/www/html/data /var/www/html/internal_data && chown -R www-data:www-data /var/www/html/data /var/www/html/internal_data /var/www/html/src/config.php || true'
+
+if [[ "$NGROK_ENABLED" -eq 1 ]]; then
+  need_cmd ngrok
+  echo "Starting ngrok public tunnel..."
+
+  NGROK_AUTH_USER="${NGROK_AUTH_USER:-zee}"
+  AUTH_FILE="$INSTANCE_DIR/ngrok-auth.txt"
+  if [[ -n "${NGROK_AUTH_PASS:-}" ]]; then
+    :
+  elif [[ -f "$AUTH_FILE" ]]; then
+    NGROK_AUTH_PASS="$(sed -n 's/^password=//p' "$AUTH_FILE" | head -n 1)"
+  else
+    if command -v openssl >/dev/null 2>&1; then
+      NGROK_AUTH_PASS="$(openssl rand -base64 18 | tr -d ':')"
+    else
+      NGROK_AUTH_PASS="ZeeTest$(date +%s)"
+    fi
+  fi
+  cat > "$AUTH_FILE" <<AUTH
+username=$NGROK_AUTH_USER
+password=$NGROK_AUTH_PASS
+AUTH
+  chmod 600 "$AUTH_FILE" || true
+
+  NGROK_AUTHTOKEN_EFFECTIVE="${NGROK_AUTHTOKEN:-}"
+  TOKEN_FILE="$INSTANCE_DIR/ngrok-token.txt"
+  if [[ -z "$NGROK_AUTHTOKEN_EFFECTIVE" && -f "$TOKEN_FILE" ]]; then
+    NGROK_AUTHTOKEN_EFFECTIVE="$(cat "$TOKEN_FILE")"
+  fi
+  if [[ -z "$NGROK_AUTHTOKEN_EFFECTIVE" ]]; then
+    fatal "PUBLIC=ngrok requires NGROK_AUTHTOKEN on first run. Get it from the ngrok dashboard, then run: PUBLIC=ngrok NGROK_AUTHTOKEN=... ./scripts/xf-up $XF_VERSION $PHP_VERSION"
+  fi
+  printf '%s' "$NGROK_AUTHTOKEN_EFFECTIVE" > "$TOKEN_FILE"
+  chmod 600 "$TOKEN_FILE" || true
+
+  NGROK_CONFIG="$INSTANCE_DIR/ngrok.yml"
+  NGROK_LOG="$INSTANCE_DIR/ngrok.log"
+  NGROK_PID_FILE="$INSTANCE_DIR/ngrok.pid"
+
+  if [[ -f "$NGROK_PID_FILE" ]]; then
+    OLD_PID="$(cat "$NGROK_PID_FILE" 2>/dev/null || true)"
+    if [[ -n "$OLD_PID" ]] && kill -0 "$OLD_PID" >/dev/null 2>&1; then
+      kill "$OLD_PID" >/dev/null 2>&1 || true
+      sleep 1
+    fi
+    rm -f "$NGROK_PID_FILE"
+  fi
+
+  TP_BLOCK=""
+  if [[ "${NGROK_AUTH:-1}" != "0" ]]; then
+    TP_BLOCK="    traffic_policy:\n      on_http_request:\n        - actions:\n            - type: \"basic-auth\"\n              config:\n                realm: \"XenForo Test Lab\"\n                credentials:\n                  - \"$NGROK_AUTH_USER:$NGROK_AUTH_PASS\"\n                enforce: true"
+    BASIC_AUTH_NOTE="  Basic auth: $NGROK_AUTH_USER / $NGROK_AUTH_PASS"
+  else
+    BASIC_AUTH_NOTE="  Basic auth: DISABLED"
+  fi
+
+  cat > "$NGROK_CONFIG" <<YAML
+version: 3
+agent:
+  authtoken: "$NGROK_AUTHTOKEN_EFFECTIVE"
+  web_addr: "127.0.0.1:$NGROK_API_PORT"
+  console_ui: false
+  log: "$NGROK_LOG"
+  log_format: logfmt
+  update_check: false
+endpoints:
+  - name: "$PROJECT_NAME"
+YAML
+  if [[ -n "${NGROK_URL:-}" ]]; then
+    cat >> "$NGROK_CONFIG" <<YAML
+    url: "$NGROK_URL"
+YAML
+  fi
+  cat >> "$NGROK_CONFIG" <<YAML
+    upstream:
+      url: "http://localhost:$PORT"
+YAML
+  if [[ -n "$TP_BLOCK" ]]; then
+    printf "%b\n" "$TP_BLOCK" >> "$NGROK_CONFIG"
+  fi
+
+  : > "$NGROK_LOG"
+  nohup ngrok start --config "$NGROK_CONFIG" "$PROJECT_NAME" >/dev/null 2>>"$NGROK_LOG" &
+  echo $! > "$NGROK_PID_FILE"
+
+  for i in $(seq 1 60); do
+    PUBLIC_URL="$(python3 - "$NGROK_API_PORT" "$PROJECT_NAME" <<'PY' 2>/dev/null || true
+import json, sys, urllib.request
+port=sys.argv[1]
+name=sys.argv[2]
+try:
+    with urllib.request.urlopen(f'http://127.0.0.1:{port}/api/endpoints', timeout=1) as r:
+        data=json.load(r)
+    for ep in data.get('endpoints', []):
+        if ep.get('name') == name and str(ep.get('url','')).startswith('https://'):
+            print(ep['url'].rstrip('/'))
+            sys.exit(0)
+except Exception:
+    pass
+PY
+)"
+    if [[ -n "$PUBLIC_URL" ]]; then
+      break
+    fi
+    if ! kill -0 "$(cat "$NGROK_PID_FILE")" >/dev/null 2>&1; then
+      echo "ngrok exited early. Log follows:"
+      cat "$NGROK_LOG" || true
+      exit 1
+    fi
+    sleep 1
+  done
+
+  [[ -n "$PUBLIC_URL" ]] || { echo "Could not discover ngrok public URL. Log follows:"; cat "$NGROK_LOG" || true; exit 1; }
+  BOARD_URL="$PUBLIC_URL"
+  echo "ngrok public URL: $PUBLIC_URL"
+fi
+
+if [[ ! -f "$INSTANCE_DIR/.installed" ]]; then
+  echo "Running XenForo CLI installer..."
+  if compose_cmd -f "$COMPOSE_FILE" -p "$PROJECT_NAME" exec -T \
+    -e XF_BOARD_URL="$BOARD_URL" \
+    -e XF_ADMIN_PASS="Admin123Pass" \
+    php bash -lc 'cd /var/www/html && xf-auto-install'; then
+    touch "$INSTANCE_DIR/.installed"
+  else
+    echo ""
+    echo "Automatic CLI install did not complete. The containers are still running."
+    echo "Finish manually with: ./scripts/xf-shell $XF_VERSION $PHP_VERSION"
+    echo "Then run: cd /var/www/html && php cmd.php xf:install"
+    exit 1
+  fi
+else
+  echo "XenForo already marked installed for this instance."
+  if [[ "$NGROK_ENABLED" -eq 1 ]]; then
+    echo "NOTE: This instance was already installed. If the ngrok URL changed, XenForo's stored board URL may still be the old one. For a clean public test, run ./scripts/xf-down $XF_VERSION $PHP_VERSION --destroy and then xf-up again."
+  fi
+fi
+
+if [[ -n "$ADDON_ID" ]]; then
+  echo "Installing/rebuilding add-on: $ADDON_ID"
+  compose_cmd -f "$COMPOSE_FILE" -p "$PROJECT_NAME" exec -T php bash -lc "cd /var/www/html && (yes y | php cmd.php xf:addon-install '$ADDON_ID' || yes y | php cmd.php xf:addon-rebuild '$ADDON_ID')"
+fi
+
+DISPLAY_URL="$BOARD_URL"
+[[ -z "$DISPLAY_URL" ]] && DISPLAY_URL="http://localhost:$PORT"
+
+cat <<DONE
+
+Instance ready.
+
+  Forum:  $DISPLAY_URL/
+  Admin:  $DISPLAY_URL/admin.php
+$BASIC_AUTH_NOTE
+  User:   admin
+  Pass:   Admin123Pass
+
+Useful commands:
+  ./scripts/xf-shell $XF_VERSION $PHP_VERSION
+  ./scripts/xf-down  $XF_VERSION $PHP_VERSION
+  ./scripts/xf-down  $XF_VERSION $PHP_VERSION --destroy
+DONE

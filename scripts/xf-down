@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+
+usage() {
+  cat <<USAGE
+Usage:
+  ./scripts/xf-down <xenforo-version> <php-version> [--destroy]
+
+Examples:
+  ./scripts/xf-down 2.3.10 8.3
+  ./scripts/xf-down 2.3.10 8.3 --destroy
+USAGE
+}
+
+[[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && { usage; exit 0; }
+[[ $# -lt 2 ]] && { usage; exit 1; }
+
+need_cmd docker
+
+XF_VERSION="$1"
+PHP_VERSION="$2"
+DESTROY="${3:-}"
+INSTANCE_NAME="$(normalise_instance_name "$XF_VERSION" "$PHP_VERSION")"
+PROJECT_NAME="$(normalise_project_name "$XF_VERSION" "$PHP_VERSION")"
+INSTANCE_DIR="$ROOT_DIR/instances/$INSTANCE_NAME"
+COMPOSE_FILE="$INSTANCE_DIR/compose.yml"
+NGROK_PID_FILE="$INSTANCE_DIR/ngrok.pid"
+
+if [[ -f "$NGROK_PID_FILE" ]]; then
+  NGROK_PID="$(cat "$NGROK_PID_FILE" 2>/dev/null || true)"
+  if [[ -n "$NGROK_PID" ]] && kill -0 "$NGROK_PID" >/dev/null 2>&1; then
+    echo "Stopping ngrok tunnel..."
+    kill "$NGROK_PID" >/dev/null 2>&1 || true
+    sleep 1
+  fi
+  rm -f "$NGROK_PID_FILE"
+fi
+
+if [[ -f "$COMPOSE_FILE" ]]; then
+  compose_cmd -f "$COMPOSE_FILE" -p "$PROJECT_NAME" down --remove-orphans
+else
+  echo "No compose file found for $INSTANCE_NAME. Nothing to stop."
+fi
+
+if [[ "$DESTROY" == "--destroy" ]]; then
+  rm -rf "$INSTANCE_DIR"
+  echo "Destroyed: $INSTANCE_DIR"
+else
+  echo "Stopped: $INSTANCE_NAME"
+  echo "Files/database kept under: $INSTANCE_DIR"
+fi

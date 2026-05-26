@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+
+if [[ ! -d "$ROOT_DIR/instances" ]] || [[ -z "$(ls -A "$ROOT_DIR/instances" 2>/dev/null || true)" ]]; then
+  echo "No generated instances yet."
+  exit 0
+fi
+
+printf '%-28s %-10s %-10s %-8s %s\n' "INSTANCE" "XF" "PHP" "PORT" "PATH"
+printf '%-28s %-10s %-10s %-8s %s\n' "--------" "--" "---" "----" "----"
+
+for d in "$ROOT_DIR"/instances/xf-*-php-*; do
+  [[ -d "$d" ]] || continue
+  name="$(basename "$d")"
+  xf="$(echo "$name" | sed -E 's/^xf-([0-9.]+)-php-.*/\1/')"
+  php="$(echo "$name" | sed -E 's/^xf-[0-9.]+-php-([0-9.]+)$/\1/')"
+  port=""
+  if [[ -f "$d/compose.yml" ]]; then
+    port="$(grep -E '^[[:space:]]+- "[0-9]+:80"' "$d/compose.yml" | head -n1 | sed -E 's/[^0-9]*([0-9]+):80.*/\1/' || true)"
+  fi
+  printf '%-28s %-10s %-10s %-8s %s\n' "$name" "$xf" "$php" "$port" "$d"
+done

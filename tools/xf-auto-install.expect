@@ -1,0 +1,59 @@
+#!/usr/bin/env expect
+set timeout 900
+
+set admin_user $env(XF_ADMIN_USER)
+set admin_pass $env(XF_ADMIN_PASS)
+set admin_email $env(XF_ADMIN_EMAIL)
+set board_title $env(XF_BOARD_TITLE)
+set board_url $env(XF_BOARD_URL)
+
+# Pass all admin/board values as CLI flags. This avoids unreliable hidden password
+# confirmation prompts in older XenForo CLI installers.
+spawn php cmd.php xf:install --user $admin_user --password $admin_pass --email $admin_email --title $board_title --url $board_url --skip-statistics
+
+expect {
+    -re {Database name:} {
+        send "xenforo\r"
+        exp_continue
+    }
+    -re {Database username:} {
+        send "xenforo\r"
+        exp_continue
+    }
+    -re {Database user:} {
+        send "xenforo\r"
+        exp_continue
+    }
+    -re {Database password:} {
+        send "xenforo\r"
+        exp_continue
+    }
+    -re {Database host:} {
+        send "db\r"
+        exp_continue
+    }
+    -re {Database port:} {
+        send "\r"
+        exp_continue
+    }
+    -re {Full Unicode support.*:} {
+        send "y\r"
+        exp_continue
+    }
+    -re {Install anyway.*:} {
+        send "y\r"
+        exp_continue
+    }
+    -re {Continue.*:} {
+        send "y\r"
+        exp_continue
+    }
+    eof {
+        catch wait result
+        exit [lindex $result 3]
+    }
+    timeout {
+        puts "Timed out waiting for XenForo installer prompt. You can continue manually with: php cmd.php xf:install"
+        exit 124
+    }
+}
