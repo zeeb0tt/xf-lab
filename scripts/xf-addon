@@ -6,16 +6,23 @@ usage() {
   cat <<USAGE
 Usage:
   ADDON_ID=Vendor/AddOn ./scripts/xf-addon <xenforo-version> <php-version> <install|upgrade|rebuild|uninstall|enable|disable|validate-json|sync-json>
+  ADDON_ID=Vendor-AddOn-1.0.0.zip ./scripts/xf-addon <xenforo-version> <php-version> <install|upgrade|rebuild|validate-json|sync-json>
 
 Examples:
   ADDON_ID=Zee/ModerationApi ./scripts/xf-addon 2.3.10 8.3 install
   ADDON_ID=Zee/ModerationApi ./scripts/xf-addon 2.3.10 8.3 rebuild
+  ADDON_ID=Zee-BotGuard-1.0.0.zip ./scripts/xf-addon 2.3.10 8.3 upgrade
 USAGE
 }
 
 [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && { usage; exit 0; }
 [[ $# -lt 3 ]] && { usage; exit 1; }
-[[ -n "${ADDON_ID:-}" ]] || fatal "Set ADDON_ID, for example: ADDON_ID=Zee/ModerationApi"
+ADDON_ID="${ADDON_ID:-${ADDON_ARCHIVE:-}}"
+[[ -n "$ADDON_ID" ]] || fatal "Set ADDON_ID, for example: ADDON_ID=Zee/ModerationApi or ADDON_ID=Zee-BotGuard-1.0.0.zip"
+
+need_cmd docker
+need_cmd python3
+need_cmd unzip
 
 XF_VERSION="$1"
 PHP_VERSION="$2"
@@ -23,6 +30,7 @@ ACTION="$3"
 INSTANCE_NAME="$(normalise_instance_name "$XF_VERSION" "$PHP_VERSION")"
 PROJECT_NAME="$(normalise_project_name "$XF_VERSION" "$PHP_VERSION")"
 INSTANCE_DIR="$ROOT_DIR/instances/$INSTANCE_NAME"
+WEBROOT="$INSTANCE_DIR/webroot"
 COMPOSE_FILE="$INSTANCE_DIR/compose.yml"
 
 [[ -f "$COMPOSE_FILE" ]] || fatal "No instance found. Run: ADDON_ID=$ADDON_ID ./scripts/xf-up $XF_VERSION $PHP_VERSION"
@@ -39,4 +47,27 @@ case "$ACTION" in
   *) usage; exit 1 ;;
 esac
 
-compose_cmd -f "$COMPOSE_FILE" -p "$PROJECT_NAME" exec -T php bash -lc "cd /var/www/html && yes y | php cmd.php $CMD '$ADDON_ID'"
+ADDON_IDS_TO_RUN=()
+
+if looks_like_zip_archive "$ADDON_ID"; then
+  [[ -d "$WEBROOT" ]] || fatal "Webroot not found: $WEBROOT"
+  ADDON_ARCHIVE_RESOLVED="$(resolve_addon_archive "$ADDON_ID")"
+  case "$ACTION" in
+    install|upgrade|rebuild|validate-json|sync-json|uninstall|enable|disable)
+      ADDON_IDS_TO_RUN=()
+      while IFS= read -r addon_id; do
+        [[ -n "$addon_id" ]] && ADDON_IDS_TO_RUN+=("$addon_id")
+      done < <(install_addon_archive_to_webroot "$ADDON_ARCHIVE_RESOLVED" "$WEBROOT" "$INSTANCE_DIR")
+      echo "Archive contains add-on ID(s): ${ADDON_IDS_TO_RUN[*]}"
+      ;;
+  esac
+
+else
+  ADDON_IDS_TO_RUN=("$ADDON_ID")
+fi
+
+for ADDON_TO_RUN in "${ADDON_IDS_TO_RUN[@]}"; do
+  ADDON_TO_RUN_QUOTED="$(shell_quote "$ADDON_TO_RUN")"
+  echo "Running $ACTION for add-on: $ADDON_TO_RUN"
+  compose_cmd -f "$COMPOSE_FILE" -p "$PROJECT_NAME" exec -T php bash -lc "cd /var/www/html && yes y | php cmd.php $CMD $ADDON_TO_RUN_QUOTED"
+done
