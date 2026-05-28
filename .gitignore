@@ -9,6 +9,8 @@ __MACOSX/
 
 # Licensed XenForo archives are never committed
 archives/*.zip
+addons/**/*.zip
+addons/*.zip
 
 # Generated disposable instances, databases, webroots, ngrok tokens/logs
 instances/

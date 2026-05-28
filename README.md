@@ -181,6 +181,39 @@ src/addons/Vendor/AddOn
 
 inside the generated XenForo install.
 
+### Install/test an add-on release ZIP
+
+XenForo 2 add-on release archives are normally rooted like this:
+
+```text
+upload/src/addons/Vendor/AddOn/addon.json
+upload/js/...
+upload/styles/...
+```
+
+That `upload/` directory is relative to the XenForo root, not relative to `src/addons/`. If you pass a ZIP filename to `ADDON_ID`, the lab extracts the archive, copies every file from the archive's `upload/` directory into the generated XenForo webroot, discovers the add-on ID from `upload/src/addons/.../addon.json`, then installs/rebuilds it.
+
+You can put add-on ZIP files in `addons/`, `archives/`, or pass an absolute/relative path:
+
+```bash
+ADDON_ID=Zee-BotGuard-1.0.0.zip ./scripts/xf-up 2.3.10 8.3
+ADDON_ID=addons/Zee-BotGuard-1.0.0.zip ./scripts/xf-up 2.3.10 8.3
+ADDON_ID=/Users/you/Downloads/Zee-BotGuard-1.0.0.zip ./scripts/xf-up 2.3.10 8.3
+```
+
+`ADDON_ARCHIVE` is also accepted as a clearer alias:
+
+```bash
+ADDON_ARCHIVE=Zee-BotGuard-1.0.0.zip ./scripts/xf-up 2.3.10 8.3
+```
+
+For an already-running instance, use the same ZIP input with `xf-addon` to copy the archive files into the existing webroot and run the XenForo CLI action:
+
+```bash
+ADDON_ID=Zee-BotGuard-1.0.1.zip ./scripts/xf-addon 2.3.10 8.3 upgrade
+ADDON_ID=Zee-BotGuard-1.0.1.zip ./scripts/xf-addon 2.3.10 8.3 rebuild
+```
+
 ### Use an external add-on path
 
 You can keep your add-on in another repo:

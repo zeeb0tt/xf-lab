@@ -11,6 +11,7 @@ Examples:
   ./scripts/xf-up 2.3.10 8.3
   PORT=9090 ./scripts/xf-up 2.3.10 8.3
   ADDON_ID=Zee/ModerationApi ./scripts/xf-up 2.3.10 8.3
+  ADDON_ID=Zee-BotGuard-1.0.0.zip ./scripts/xf-up 2.3.10 8.3
 
 Public ngrok example:
   PUBLIC=ngrok NGROK_AUTHTOKEN=YOUR_TOKEN ADDON_ID=Zee/ModerationApi ./scripts/xf-up 2.1.15 7.2
@@ -50,10 +51,17 @@ if [[ "$PUBLIC_MODE" == "ngrok" || "$PUBLIC_MODE" == "1" || "$PUBLIC_MODE" == "t
 fi
 NGROK_API_PORT="${NGROK_API_PORT:-$(calculate_ngrok_api_port "$XF_VERSION" "$PHP_VERSION")}" 
 ADDON_ID="${ADDON_ID:-}"
+ADDON_ARCHIVE="${ADDON_ARCHIVE:-}"
 ADDON_SOURCE_RESOLVED=""
+ADDON_ARCHIVE_RESOLVED=""
+ADDON_IDS_TO_INSTALL=()
 BOARD_URL="${LAB_URL:-http://localhost:$PORT}"
 PUBLIC_URL=""
 BASIC_AUTH_NOTE=""
+
+if [[ -z "$ADDON_ID" && -n "$ADDON_ARCHIVE" ]]; then
+  ADDON_ID="$ADDON_ARCHIVE"
+fi
 
 [[ -f "$ARCHIVE" ]] || fatal "Missing XenForo archive: $ARCHIVE"
 
@@ -69,18 +77,37 @@ if [[ ! -f "$WEBROOT/cmd.php" ]]; then
   unzip -q "$ARCHIVE" -d "$TMP_DIR"
 
   UPLOAD_DIR=""
-  if [[ -d "$TMP_DIR/upload" ]]; then
+  if [[ -d "$TMP_DIR/upload" && -f "$TMP_DIR/upload/cmd.php" ]]; then
     UPLOAD_DIR="$TMP_DIR/upload"
   else
-    UPLOAD_DIR="$(find "$TMP_DIR" -maxdepth 3 -type d -name upload 2>/dev/null | head -n 1 || true)"
+    UPLOAD_DIR="$(python3 - "$TMP_DIR" <<'PY'
+import os
+import sys
+
+tmp_dir = os.path.abspath(sys.argv[1])
+
+for current_root, dirs, files in os.walk(tmp_dir):
+    rel = os.path.relpath(current_root, tmp_dir)
+    depth = 0 if rel == '.' else rel.count(os.sep) + 1
+    dirs[:] = sorted(d for d in dirs if d not in {'.git', '__MACOSX'})
+    if depth > 3:
+        dirs[:] = []
+        continue
+    if os.path.basename(current_root) == 'upload' and 'cmd.php' in files:
+        print(current_root)
+        sys.exit(0)
+
+if os.path.isfile(os.path.join(tmp_dir, 'cmd.php')):
+    print(tmp_dir)
+    sys.exit(0)
+
+sys.exit(0)
+PY
+)"
   fi
 
   if [[ -z "$UPLOAD_DIR" || ! -f "$UPLOAD_DIR/cmd.php" ]]; then
-    if [[ -f "$TMP_DIR/cmd.php" ]]; then
-      UPLOAD_DIR="$TMP_DIR"
-    else
-      fatal "Could not find XenForo upload directory containing cmd.php in $ARCHIVE"
-    fi
+    fatal "Could not find XenForo upload directory containing cmd.php in $ARCHIVE"
   fi
 
   cp -a "$UPLOAD_DIR/." "$WEBROOT/"
@@ -109,10 +136,20 @@ COMPOSE_FILE="$INSTANCE_DIR/compose.yml"
 
 ADDON_VOLUME_BLOCK=""
 if [[ -n "$ADDON_ID" ]]; then
-  ADDON_SOURCE_RESOLVED="$(resolve_addon_source "$ADDON_ID")"
-  ADDON_VOLUME_BLOCK="      - \"$ADDON_SOURCE_RESOLVED:/var/www/html/src/addons/$ADDON_ID:rw\""
-  echo "Mounting add-on: $ADDON_ID"
-  echo "From: $ADDON_SOURCE_RESOLVED"
+  if looks_like_zip_archive "$ADDON_ID"; then
+    ADDON_ARCHIVE_RESOLVED="$(resolve_addon_archive "$ADDON_ID")"
+    ADDON_IDS_TO_INSTALL=()
+    while IFS= read -r addon_id; do
+      [[ -n "$addon_id" ]] && ADDON_IDS_TO_INSTALL+=("$addon_id")
+    done < <(install_addon_archive_to_webroot "$ADDON_ARCHIVE_RESOLVED" "$WEBROOT" "$INSTANCE_DIR")
+    echo "Archive contains add-on ID(s): ${ADDON_IDS_TO_INSTALL[*]}"
+  else
+    ADDON_SOURCE_RESOLVED="$(resolve_addon_source "$ADDON_ID")"
+    ADDON_VOLUME_BLOCK="      - \"$ADDON_SOURCE_RESOLVED:/var/www/html/src/addons/$ADDON_ID:rw\""
+    ADDON_IDS_TO_INSTALL=("$ADDON_ID")
+    echo "Mounting add-on: $ADDON_ID"
+    echo "From: $ADDON_SOURCE_RESOLVED"
+  fi
 fi
 
 cat > "$COMPOSE_FILE" <<YAML
@@ -297,9 +334,12 @@ else
   fi
 fi
 
-if [[ -n "$ADDON_ID" ]]; then
-  echo "Installing/rebuilding add-on: $ADDON_ID"
-  compose_cmd -f "$COMPOSE_FILE" -p "$PROJECT_NAME" exec -T php bash -lc "cd /var/www/html && (yes y | php cmd.php xf:addon-install '$ADDON_ID' || yes y | php cmd.php xf:addon-rebuild '$ADDON_ID')"
+if [[ "${#ADDON_IDS_TO_INSTALL[@]}" -gt 0 ]]; then
+  for ADDON_TO_INSTALL in "${ADDON_IDS_TO_INSTALL[@]}"; do
+    ADDON_TO_INSTALL_QUOTED="$(shell_quote "$ADDON_TO_INSTALL")"
+    echo "Installing/rebuilding add-on: $ADDON_TO_INSTALL"
+    compose_cmd -f "$COMPOSE_FILE" -p "$PROJECT_NAME" exec -T php bash -lc "cd /var/www/html && (yes y | php cmd.php xf:addon-install $ADDON_TO_INSTALL_QUOTED || yes y | php cmd.php xf:addon-rebuild $ADDON_TO_INSTALL_QUOTED)"
+  done
 fi
 
 DISPLAY_URL="$BOARD_URL"
